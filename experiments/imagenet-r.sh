@@ -7,7 +7,7 @@ N_CLASS=200
 OUTDIR=outputs/${DATASET}/10-task
 
 # hard coded inputs
-GPUID='0 1 2 3'
+GPUID='0'
 CONFIG=configs/imnet-r_prompt.yaml
 REPEAT=1
 OVERWRITE=0

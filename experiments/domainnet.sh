@@ -7,7 +7,7 @@ N_CLASS=345
 OUTDIR=outputs/${DATASET}/5-task
 
 # hard coded inputs
-GPUID='0 1 2 3'
+GPUID='0'
 CONFIG=configs/domainnet_prompt.yaml
 REPEAT=1
 OVERWRITE=0
