@@ -169,32 +169,33 @@ class NormalNN(nn.Module):
 
         orig_mode = model.training
         model.eval()
-        for i, (input, target, task) in enumerate(dataloader):
+        with torch.no_grad():
+            for i, (input, target, task) in enumerate(dataloader):
 
-            if self.gpu:
-                with torch.no_grad():
-                    input = input.cuda()
-                    target = target.cuda()
-            if task_in is None:
-                output = model.forward(input)[:, :self.valid_out_dim]
-                acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
-            else:
-                mask = target >= task_in[0]
-                mask_ind = mask.nonzero().view(-1) 
-                input, target = input[mask_ind], target[mask_ind]
+                if self.gpu:
+                    with torch.no_grad():
+                        input = input.cuda()
+                        target = target.cuda()
+                if task_in is None:
+                    output = model.forward(input)[:, :self.valid_out_dim]
+                    acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
+                else:
+                    mask = target >= task_in[0]
+                    mask_ind = mask.nonzero().view(-1) 
+                    input, target = input[mask_ind], target[mask_ind]
 
-                mask = target < task_in[-1]
-                mask_ind = mask.nonzero().view(-1) 
-                input, target = input[mask_ind], target[mask_ind]
+                    mask = target < task_in[-1]
+                    mask_ind = mask.nonzero().view(-1) 
+                    input, target = input[mask_ind], target[mask_ind]
+                    
+                    if len(target) > 1:
+                        if task_global:
+                            output = model.forward(input)[:, :self.valid_out_dim]
+                            acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
+                        else:
+                            output = model.forward(input)[:, task_in]
+                            acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
                 
-                if len(target) > 1:
-                    if task_global:
-                        output = model.forward(input)[:, :self.valid_out_dim]
-                        acc = accumulate_acc(output, target, task, acc, topk=(self.top_k,))
-                    else:
-                        output = model.forward(input)[:, task_in]
-                        acc = accumulate_acc(output, target-task_in[0], task, acc, topk=(self.top_k,))
-            
         model.train(orig_mode)
 
         if verbal:
