@@ -10,7 +10,7 @@ OUTDIR=outputs/${DATASET}/10-task
 GPUID='0'
 CONFIG=configs/imnet-r_prompt.yaml
 REPEAT=1
-OVERWRITE=0
+OVERWRITE=1
 
 ###############################################################
 
