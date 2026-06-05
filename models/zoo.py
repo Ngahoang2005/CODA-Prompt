@@ -17,7 +17,13 @@ class CodaPrompt(nn.Module):
         self.key_d = key_dim
         self.n_tasks = n_tasks
         self._init_smart(emb_d, prompt_param)
-
+        for g in self.g_layers:
+            p = tensor_prompt(self.g_pool_size, self.g_p_length, emb_d)
+            k = tensor_prompt(self.g_pool_size, self.key_d)
+            a = tensor_prompt(self.g_pool_size, self.key_d)
+            setattr(self, f'g_p_{g}', p)
+            setattr(self, f'g_k_{g}', k)
+            setattr(self, f'g_a_{g}', a)
         # e prompt init
         for e in self.e_layers:
             # for model saving/loading simplicity, we init the full paramaters here
@@ -27,7 +33,7 @@ class CodaPrompt(nn.Module):
             #
             # in the original paper, we used ortho init at the start - this modification is more 
             # fair in the spirit of continual learning and has little affect on performance
-            e_l = self.e_p_length
+            e_l = self.e_p_length 
             p = tensor_prompt(self.e_pool_size, e_l, emb_d)
             k = tensor_prompt(self.e_pool_size, self.key_d)
             a = tensor_prompt(self.e_pool_size, self.key_d)
@@ -43,8 +49,11 @@ class CodaPrompt(nn.Module):
         # prompt basic param
         self.e_pool_size = int(prompt_param[0])
         self.e_p_length = int(prompt_param[1])
-        self.e_layers = [0,1,2,3,4]
-
+        self.g_layers = [0, 1]       # Tầng nông cho G-components
+        self.e_layers = [2, 3, 4]
+        #self.e_layers = [0,1,2,3,4]
+        self.g_pool_size = int(prompt_param[0])
+        self.g_p_length = int(prompt_param[1])
         # strenth of ortho penalty
         self.ortho_mu = prompt_param[2]
         
@@ -130,27 +139,119 @@ class CodaPrompt(nn.Module):
         
         return torch.nn.Parameter(uu) 
 
+    # def forward(self, x_querry, l, x_block, train=False, task_id=None):
+        
+    #     # e prompts
+    #     e_valid = False
+    #     if l in self.e_layers:
+    #         e_valid = True
+    #         B, C = x_querry.shape
+
+    #         K = getattr(self,f'e_k_{l}')
+    #         A = getattr(self,f'e_a_{l}')
+    #         p = getattr(self,f'e_p_{l}')
+    #         pt = int(self.e_pool_size / (self.n_tasks))
+    #         s = int(self.task_count * pt)
+    #         f = int((self.task_count + 1) * pt)
+            
+    #         # freeze/control past tasks
+    #         if train:
+    #             if self.task_count > 0:
+    #                 K = torch.cat((K[:s].detach().clone(),K[s:f]), dim=0)
+    #                 A = torch.cat((A[:s].detach().clone(),A[s:f]), dim=0)
+    #                 p = torch.cat((p[:s].detach().clone(),p[s:f]), dim=0)
+    #             else:
+    #                 K = K[s:f]
+    #                 A = A[s:f]
+    #                 p = p[s:f]
+    #         else:
+    #             K = K[0:f]
+    #             A = A[0:f]
+    #             p = p[0:f]
+
+    #         # with attention and cosine sim
+    #         # (b x 1 x d) * soft([1 x k x d]) = (b x k x d) -> attention = k x d
+    #         a_querry = torch.einsum('bd,kd->bkd', x_querry, A)
+    #         # # (b x k x d) - [1 x k x d] = (b x k) -> key = k x d
+    #         n_K = nn.functional.normalize(K, dim=1)
+    #         q = nn.functional.normalize(a_querry, dim=2)
+    #         aq_k = torch.einsum('bkd,kd->bk', q, n_K)
+    #         # (b x 1 x k x 1) * [1 x plen x k x d] = (b x plen x d) -> prompt = plen x k x d
+    #         P_ = torch.einsum('bk,kld->bld', aq_k, p)
+
+    #         # select prompts
+    #         i = int(self.e_p_length/2)
+    #         Ek = P_[:,:i,:]
+    #         Ev = P_[:,i:,:]
+
+    #         # ortho penalty
+    #         if train and self.ortho_mu > 0:
+    #             loss = ortho_penalty(K) * self.ortho_mu
+    #             loss += ortho_penalty(A) * self.ortho_mu
+    #             loss += ortho_penalty(p.view(p.shape[0], -1)) * self.ortho_mu
+    #         else:
+    #             loss = 0
+    #     else:
+    #         loss = 0
+
+    #     # combine prompts for prefix tuning
+    #     if e_valid:
+    #         p_return = [Ek, Ev]
+    #     else:
+    #         p_return = None
+
+    #     # return
+    #     return p_return, loss, x_block
     def forward(self, x_querry, l, x_block, train=False, task_id=None):
+        B, C = x_querry.shape
+        p_return = None
+        loss = 0
 
-        # e prompts
-        e_valid = False
-        if l in self.e_layers:
-            e_valid = True
-            B, C = x_querry.shape
+        # -------------------------------------------------------------
+        # XỬ LÝ G-COMPONENTS (Shared, Không đóng băng, Không Ortho Loss)
+        # -------------------------------------------------------------
+        if l in self.g_layers:
+            K = getattr(self, f'g_k_{l}')
+            A = getattr(self, f'g_a_{l}')
+            p = getattr(self, f'g_p_{l}')
+            
+            # G-components luôn dùng toàn bộ pool và được cập nhật liên tục
+            # qua các tasks, không cắt lát (s:f)
+            
+            # Tính toán Attention weighting (tương tự E)
+            a_querry = torch.einsum('bd,kd->bkd', x_querry, A)
+            n_K = nn.functional.normalize(K, dim=1)
+            q = nn.functional.normalize(a_querry, dim=2)
+            aq_k = torch.einsum('bkd,kd->bk', q, n_K)
+            P_ = torch.einsum('bk,kld->bld', aq_k, p)
 
-            K = getattr(self,f'e_k_{l}')
-            A = getattr(self,f'e_a_{l}')
-            p = getattr(self,f'e_p_{l}')
+            # Phân tách Key, Value cho prefix tuning
+            i = int(self.g_p_length / 2)
+            Gk = P_[:, :i, :]
+            Gv = P_[:, i:, :]
+            p_return = [Gk, Gv]
+            
+            # Bỏ qua Ortho loss cho G-components để cho phép hướng vector chia sẻ
+            loss = 0
+
+        # -------------------------------------------------------------
+        # XỬ LÝ E-COMPONENTS (Per-task, Expandable, Có Ortho Loss)
+        # -------------------------------------------------------------
+        elif l in self.e_layers:
+            K = getattr(self, f'e_k_{l}')
+            A = getattr(self, f'e_a_{l}')
+            p = getattr(self, f'e_p_{l}')
+            
             pt = int(self.e_pool_size / (self.n_tasks))
             s = int(self.task_count * pt)
             f = int((self.task_count + 1) * pt)
             
-            # freeze/control past tasks
+            # Đóng băng (Freeze) past tasks
             if train:
                 if self.task_count > 0:
-                    K = torch.cat((K[:s].detach().clone(),K[s:f]), dim=0)
-                    A = torch.cat((A[:s].detach().clone(),A[s:f]), dim=0)
-                    p = torch.cat((p[:s].detach().clone(),p[s:f]), dim=0)
+                    K = torch.cat((K[:s].detach().clone(), K[s:f]), dim=0)
+                    A = torch.cat((A[:s].detach().clone(), A[s:f]), dim=0)
+                    p = torch.cat((p[:s].detach().clone(), p[s:f]), dim=0)
                 else:
                     K = K[s:f]
                     A = A[s:f]
@@ -160,40 +261,28 @@ class CodaPrompt(nn.Module):
                 A = A[0:f]
                 p = p[0:f]
 
-            # with attention and cosine sim
-            # (b x 1 x d) * soft([1 x k x d]) = (b x k x d) -> attention = k x d
+            # Tính toán Attention weighting
             a_querry = torch.einsum('bd,kd->bkd', x_querry, A)
-            # # (b x k x d) - [1 x k x d] = (b x k) -> key = k x d
             n_K = nn.functional.normalize(K, dim=1)
             q = nn.functional.normalize(a_querry, dim=2)
             aq_k = torch.einsum('bkd,kd->bk', q, n_K)
-            # (b x 1 x k x 1) * [1 x plen x k x d] = (b x plen x d) -> prompt = plen x k x d
             P_ = torch.einsum('bk,kld->bld', aq_k, p)
 
-            # select prompts
-            i = int(self.e_p_length/2)
-            Ek = P_[:,:i,:]
-            Ev = P_[:,i:,:]
+            # Phân tách Key, Value cho prefix tuning
+            i = int(self.e_p_length / 2)
+            Ek = P_[:, :i, :]
+            Ev = P_[:, i:, :]
+            p_return = [Ek, Ev]
 
-            # ortho penalty
+            # Ortho penalty chỉ ép lên E-components để tránh interference
             if train and self.ortho_mu > 0:
                 loss = ortho_penalty(K) * self.ortho_mu
                 loss += ortho_penalty(A) * self.ortho_mu
                 loss += ortho_penalty(p.view(p.shape[0], -1)) * self.ortho_mu
             else:
                 loss = 0
-        else:
-            loss = 0
 
-        # combine prompts for prefix tuning
-        if e_valid:
-            p_return = [Ek, Ev]
-        else:
-            p_return = None
-
-        # return
         return p_return, loss, x_block
-
 def ortho_penalty(t):
     return ((t @t.T - torch.eye(t.shape[0]).cuda())**2).mean()
 
