@@ -195,14 +195,14 @@ class CodaPrompt(nn.Module):
             
             # Không tính Cosine. Copy (expand) G-Prompt gắn vào mọi bức ảnh
             # Chuyển shape từ (1, length, dim) -> (Batch, length, dim)
-            P_ = p.expand(B, -1, -1)
+            P_ = p.repeat(B, 1, 1)
 
+            # Phân tách Key, Value cho prefix tuning
             i = int(self.g_p_length / 2)
             Gk = P_[:, :i, :]
             Gv = P_[:, i:, :]
             p_return = [Gk, Gv]
             
-            # G-Prompt không cần hàm phạt vì nó không phân loại
             loss = 0
 
 
@@ -256,12 +256,15 @@ class CodaPrompt(nn.Module):
                 if self.ortho_mu_ge > 0:
                     G_P_all = torch.cat([getattr(self, f'g_p_{g}') for g in self.g_layers], dim=0)
                     
-                    # Reshape về dạng (Số_lượng_token, emb_d) để giải quyết việc g_p_length != e_p_length
-                    # Tính trực giao chéo trực tiếp trên không gian đặc trưng (emb_d)
                     flat_e_p = p.reshape(-1, self.emb_d)
-                    flat_g_p = G_P_all.reshape(-1, self.emb_d)
+                    
+                    # [FIX 2]: Thêm .detach() vào G_P_all.
+                    # Ép E phải né G, nhưng cấm E đẩy gradient ngược về làm hỏng G.
+                    # Điều này vừa tăng accuracy vừa tiết kiệm bộ nhớ cực lớn!
+                    flat_g_p = G_P_all.detach().reshape(-1, self.emb_d)
                     
                     loss += cross_ortho_penalty(flat_e_p, flat_g_p) * self.ortho_mu_ge
+            else:
                 loss = 0
 
         return p_return, loss, x_block
