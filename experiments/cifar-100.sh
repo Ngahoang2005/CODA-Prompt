@@ -7,10 +7,11 @@ N_CLASS=200
 OUTDIR=outputs/${DATASET}/10-task
 
 # hard coded inputs
+# ko có gpu
 GPUID='0'
 CONFIG=configs/cifar-100_prompt.yaml
 CONFIG_FT=configs/cifar-100_ft.yaml
-REPEAT=5
+REPEAT=1
 OVERWRITE=1
 
 ###############################################################
@@ -70,4 +71,3 @@ python -u run.py --config $CONFIG --gpuid $GPUID --repeat $REPEAT --overwrite $O
 # python -u run.py --config $CONFIG_FT --gpuid $GPUID --repeat $REPEAT --overwrite $OVERWRITE \
 #     --learner_type default --learner_name NormalNN --upper_bound_flag \
 #     --log_dir ${OUTDIR}/offline
-

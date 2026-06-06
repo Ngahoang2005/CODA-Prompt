@@ -17,7 +17,9 @@ class CodaPrompt(nn.Module):
         self.key_d = key_dim
         self.n_tasks = n_tasks
         self._init_smart(emb_d, prompt_param)
-
+        for g in self.g_layers:
+            p = tensor_prompt(self.g_pool_size, self.g_p_length, emb_d)
+            setattr(self, f'g_p_{g}', p)
         # e prompt init
         for e in self.e_layers:
             # for model saving/loading simplicity, we init the full paramaters here
@@ -27,7 +29,7 @@ class CodaPrompt(nn.Module):
             #
             # in the original paper, we used ortho init at the start - this modification is more 
             # fair in the spirit of continual learning and has little affect on performance
-            e_l = self.e_p_length
+            e_l = self.e_p_length 
             p = tensor_prompt(self.e_pool_size, e_l, emb_d)
             k = tensor_prompt(self.e_pool_size, self.key_d)
             a = tensor_prompt(self.e_pool_size, self.key_d)
@@ -43,11 +45,16 @@ class CodaPrompt(nn.Module):
         # prompt basic param
         self.e_pool_size = int(prompt_param[0])
         self.e_p_length = int(prompt_param[1])
-        self.e_layers = [0,1,2,3,4]
-
+        self.g_layers = [0, 1]       # Tầng nông cho G-components
+        self.e_layers = [2, 3, 4]
+        #self.e_layers = [0,1,2,3,4]
+        # độ dài của prompt G = E - 2 
+        self.g_pool_size = 1
+        self.g_p_length = int(prompt_param[1]) - 2
         # strenth of ortho penalty
         self.ortho_mu = prompt_param[2]
-        
+        self.ortho_mu_g = 0.05                # lambda_G (Ortho cho G components, tránh quên)
+        self.ortho_mu_ge = 0.01               # lambda_GE (Cross-Ortho giữa G và E, tránh interference/Lazy Learning)
     def process_task_count(self):
         self.task_count += 1
 
@@ -130,27 +137,92 @@ class CodaPrompt(nn.Module):
         
         return torch.nn.Parameter(uu) 
 
+    def gram_schmidt_full(self, vv):
+        def projection(u, v):
+            denominator = (u * u).sum()
+            if denominator < 1e-8:
+                return None
+            else:
+                return (v * u).sum() / denominator * u
+
+        is_3d = len(vv.shape) == 3
+        if is_3d:
+            shape_2d = copy.deepcopy(vv.shape)
+            vv = vv.view(vv.shape[0],-1)
+
+        vv = vv.T
+        uu = torch.zeros_like(vv, device=vv.device)
+
+        # Xử lý toàn bộ không cắt lát [s:f] như E-pool
+        for k in range(vv.size(1)):
+            redo = True
+            while redo:
+                redo = False
+                vk = torch.randn_like(vv[:,k]).to(vv.device)
+                uk = 0
+                for j in range(0, k):
+                    if not redo:
+                        uj = uu[:, j].clone()
+                        proj = projection(uj, vk)
+                        if proj is None:
+                            redo = True
+                        else:
+                            uk = uk + proj
+                if not redo: uu[:, k] = vk - uk
+                
+        for k in range(vv.size(1)):
+            uk = uu[:, k].clone()
+            uu[:, k] = uk / (uk.norm())
+
+        uu = uu.T 
+        if is_3d:
+            uu = uu.view(shape_2d)
+        
+        return torch.nn.Parameter(uu)
     def forward(self, x_querry, l, x_block, train=False, task_id=None):
+        B, C = x_querry.shape
+        p_return = None
+        loss = 0
 
-        # e prompts
-        e_valid = False
-        if l in self.e_layers:
-            e_valid = True
-            B, C = x_querry.shape
+        # -------------------------------------------------------------
+        # XỬ LÝ G-COMPONENTS (Shared)
+        # -------------------------------------------------------------
+        # -------------------------------------------------------------
+        # XỬ LÝ G-COMPONENTS (Shared)
+        # -------------------------------------------------------------
+        if l in self.g_layers:
+            p = getattr(self, f'g_p_{l}')
+            
+            # Không tính Cosine. Copy (expand) G-Prompt gắn vào mọi bức ảnh
+            # Chuyển shape từ (1, length, dim) -> (Batch, length, dim)
+            P_ = p.expand(B, -1, -1)
 
-            K = getattr(self,f'e_k_{l}')
-            A = getattr(self,f'e_a_{l}')
-            p = getattr(self,f'e_p_{l}')
+            i = int(self.g_p_length / 2)
+            Gk = P_[:, :i, :]
+            Gv = P_[:, i:, :]
+            p_return = [Gk, Gv]
+            
+            # G-Prompt không cần hàm phạt vì nó không phân loại
+            loss = 0
+
+
+        # -------------------------------------------------------------
+        # XỬ LÝ E-COMPONENTS (Task-specific)
+        # -------------------------------------------------------------
+        elif l in self.e_layers:
+            K = getattr(self, f'e_k_{l}')
+            A = getattr(self, f'e_a_{l}')
+            p = getattr(self, f'e_p_{l}')
+            
             pt = int(self.e_pool_size / (self.n_tasks))
             s = int(self.task_count * pt)
             f = int((self.task_count + 1) * pt)
             
-            # freeze/control past tasks
             if train:
                 if self.task_count > 0:
-                    K = torch.cat((K[:s].detach().clone(),K[s:f]), dim=0)
-                    A = torch.cat((A[:s].detach().clone(),A[s:f]), dim=0)
-                    p = torch.cat((p[:s].detach().clone(),p[s:f]), dim=0)
+                    K = torch.cat((K[:s].detach().clone(), K[s:f]), dim=0)
+                    A = torch.cat((A[:s].detach().clone(), A[s:f]), dim=0)
+                    p = torch.cat((p[:s].detach().clone(), p[s:f]), dim=0)
                 else:
                     K = K[s:f]
                     A = A[s:f]
@@ -160,43 +232,45 @@ class CodaPrompt(nn.Module):
                 A = A[0:f]
                 p = p[0:f]
 
-            # with attention and cosine sim
-            # (b x 1 x d) * soft([1 x k x d]) = (b x k x d) -> attention = k x d
+            # Attention
             a_querry = torch.einsum('bd,kd->bkd', x_querry, A)
-            # # (b x k x d) - [1 x k x d] = (b x k) -> key = k x d
             n_K = nn.functional.normalize(K, dim=1)
             q = nn.functional.normalize(a_querry, dim=2)
             aq_k = torch.einsum('bkd,kd->bk', q, n_K)
-            # (b x 1 x k x 1) * [1 x plen x k x d] = (b x plen x d) -> prompt = plen x k x d
             P_ = torch.einsum('bk,kld->bld', aq_k, p)
 
-            # select prompts
-            i = int(self.e_p_length/2)
-            Ek = P_[:,:i,:]
-            Ev = P_[:,i:,:]
+            i = int(self.e_p_length / 2)
+            Ek = P_[:, :i, :]
+            Ev = P_[:, i:, :]
+            p_return = [Ek, Ev]
 
-            # ortho penalty
-            if train and self.ortho_mu > 0:
-                loss = ortho_penalty(K) * self.ortho_mu
-                loss += ortho_penalty(A) * self.ortho_mu
-                loss += ortho_penalty(p.view(p.shape[0], -1)) * self.ortho_mu
+            # --- MỚI: Tính toán Loss ---
+            if train:
+                # 1. Ortho cho E (Tránh quên)
+                if self.ortho_mu > 0:
+                    loss = ortho_penalty(K) * self.ortho_mu
+                    loss += ortho_penalty(A) * self.ortho_mu
+                    loss += ortho_penalty(p.view(p.shape[0], -1)) * self.ortho_mu
+                
+                # 2. Cross-Ortho G-E (Tránh interference/Lazy Learning)
+                if self.ortho_mu_ge > 0:
+                    # Gom tất cả Key của G-components lại để so sánh với Key của E hiện tại
+                    # Chúng ta ép "Không gian Keys tìm kiếm" của G và E phải phân tách nhau
+                    G_K_all = torch.cat([getattr(self, f'g_k_{g}') for g in self.g_layers], dim=0)
+                    loss += cross_ortho_penalty(K, G_K_all) * self.ortho_mu_ge
             else:
                 loss = 0
-        else:
-            loss = 0
 
-        # combine prompts for prefix tuning
-        if e_valid:
-            p_return = [Ek, Ev]
-        else:
-            p_return = None
-
-        # return
         return p_return, loss, x_block
-
 def ortho_penalty(t):
     return ((t @t.T - torch.eye(t.shape[0]).cuda())**2).mean()
-
+def cross_ortho_penalty(t1, t2):
+    """Ép trực giao chéo giữa 2 tensor khác kích thước (ví dụ: G và E)"""
+    n_t1 = nn.functional.normalize(t1, dim=1)
+    n_t2 = nn.functional.normalize(t2, dim=1)
+    # Ma trận tương quan chéo
+    cross_corr = n_t1 @ n_t2.T 
+    return (cross_corr ** 2).mean()
 # @article{wang2022dualprompt,
 #   title={DualPrompt: Complementary Prompting for Rehearsal-free Continual Learning},
 #   author={Wang, Zifeng and Zhang, Zizhao and Ebrahimi, Sayna and Sun, Ruoxi and Zhang, Han and Lee, Chen-Yu and Ren, Xiaoqi and Su, Guolong and Perot, Vincent and Dy, Jennifer and others},
