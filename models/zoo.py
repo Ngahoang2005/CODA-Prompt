@@ -254,11 +254,14 @@ class CodaPrompt(nn.Module):
                 
                 # 2. Cross-Ortho G-E (Tránh interference/Lazy Learning)
                 if self.ortho_mu_ge > 0:
-                    # Gom tất cả Key của G-components lại để so sánh với Key của E hiện tại
-                    # Chúng ta ép "Không gian Keys tìm kiếm" của G và E phải phân tách nhau
-                    G_K_all = torch.cat([getattr(self, f'g_k_{g}') for g in self.g_layers], dim=0)
-                    loss += cross_ortho_penalty(K, G_K_all) * self.ortho_mu_ge
-            else:
+                    G_P_all = torch.cat([getattr(self, f'g_p_{g}') for g in self.g_layers], dim=0)
+                    
+                    # Reshape về dạng (Số_lượng_token, emb_d) để giải quyết việc g_p_length != e_p_length
+                    # Tính trực giao chéo trực tiếp trên không gian đặc trưng (emb_d)
+                    flat_e_p = p.reshape(-1, self.emb_d)
+                    flat_g_p = G_P_all.reshape(-1, self.emb_d)
+                    
+                    loss += cross_ortho_penalty(flat_e_p, flat_g_p) * self.ortho_mu_ge
                 loss = 0
 
         return p_return, loss, x_block
