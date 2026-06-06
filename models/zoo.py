@@ -8,7 +8,6 @@ from .vit import VisionTransformer
 import numpy as np
 import copy
 
-# Our method!
 class CodaPrompt(nn.Module):
     def __init__(self, emb_d, n_tasks, prompt_param, key_dim=768):
         super().__init__()
@@ -17,266 +16,174 @@ class CodaPrompt(nn.Module):
         self.key_d = key_dim
         self.n_tasks = n_tasks
         self._init_smart(emb_d, prompt_param)
+        
+        # G-prompt init
         for g in self.g_layers:
             p = tensor_prompt(self.g_pool_size, self.g_p_length, emb_d)
             setattr(self, f'g_p_{g}', p)
-        # e prompt init
+        
+        # E-prompt init
         for e in self.e_layers:
-            # for model saving/loading simplicity, we init the full paramaters here
-            # however, please note that we reinit the new components at each task
-            # in the "spirit of continual learning", as we don't know how many tasks
-            # we will encounter at the start of the task sequence
-            #
-            # in the original paper, we used ortho init at the start - this modification is more 
-            # fair in the spirit of continual learning and has little affect on performance
-            e_l = self.e_p_length 
-            p = tensor_prompt(self.e_pool_size, e_l, emb_d)
+            p = tensor_prompt(self.e_pool_size, self.e_p_length, emb_d)
             k = tensor_prompt(self.e_pool_size, self.key_d)
             a = tensor_prompt(self.e_pool_size, self.key_d)
             p = self.gram_schmidt(p)
             k = self.gram_schmidt(k)
             a = self.gram_schmidt(a)
-            setattr(self, f'e_p_{e}',p)
-            setattr(self, f'e_k_{e}',k)
-            setattr(self, f'e_a_{e}',a)
+            setattr(self, f'e_p_{e}', p)
+            setattr(self, f'e_k_{e}', k)
+            setattr(self, f'e_a_{e}', a)
 
     def _init_smart(self, emb_d, prompt_param):
-
-        # prompt basic param
         self.e_pool_size = int(prompt_param[0])
-        self.e_p_length = int(prompt_param[1])
-        self.g_layers = [0, 1]       # Tầng nông cho G-components
-        self.e_layers = [2, 3, 4]
-        #self.e_layers = [0,1,2,3,4]
-        # độ dài của prompt G = E - 2 
+        self.e_p_length  = int(prompt_param[1])
+        self.g_layers    = [0, 1]
+        self.e_layers    = [2, 3, 4]
         self.g_pool_size = 1
-        self.g_p_length = int(prompt_param[1]) - 2
-        # strenth of ortho penalty
-        self.ortho_mu = prompt_param[2]
-        self.ortho_mu_g = 0.05                # lambda_G (Ortho cho G components, tránh quên)
-        self.ortho_mu_ge = 0.01               # lambda_GE (Cross-Ortho giữa G và E, tránh interference/Lazy Learning)
+        self.g_p_length  = int(prompt_param[1])  # Dùng cùng length với E để đơn giản
+        self.ortho_mu    = prompt_param[2]
+        self.ortho_mu_ge = 0.01
+
     def process_task_count(self):
         self.task_count += 1
-
-        # in the spirit of continual learning, we will reinit the new components
-        # for the new task with Gram Schmidt
-        #
-        # in the original paper, we used ortho init at the start - this modification is more 
-        # fair in the spirit of continual learning and has little affect on performance
-        # 
-        # code for this function is modified from:
-        # https://github.com/legendongary/pytorch-gram-schmidt/blob/master/gram_schmidt.py
         for e in self.e_layers:
-            K = getattr(self,f'e_k_{e}')
-            A = getattr(self,f'e_a_{e}')
-            P = getattr(self,f'e_p_{e}')
-            k = self.gram_schmidt(K)
-            a = self.gram_schmidt(A)
-            p = self.gram_schmidt(P)
-            setattr(self, f'e_p_{e}',p)
-            setattr(self, f'e_k_{e}',k)
-            setattr(self, f'e_a_{e}',a)
+            K = getattr(self, f'e_k_{e}')
+            A = getattr(self, f'e_a_{e}')
+            P = getattr(self, f'e_p_{e}')
+            setattr(self, f'e_k_{e}', self.gram_schmidt(K))
+            setattr(self, f'e_a_{e}', self.gram_schmidt(A))
+            setattr(self, f'e_p_{e}', self.gram_schmidt(P))
 
-    # code for this function is modified from:
-    # https://github.com/legendongary/pytorch-gram-schmidt/blob/master/gram_schmidt.py
     def gram_schmidt(self, vv):
-
         def projection(u, v):
-            denominator = (u * u).sum()
+            denom = (u * u).sum()
+            return None if denom < 1e-8 else (v * u).sum() / denom * u
 
-            if denominator < 1e-8:
-                return None
-            else:
-                return (v * u).sum() / denominator * u
-
-        # check if the tensor is 3D and flatten the last two dimensions if necessary
         is_3d = len(vv.shape) == 3
         if is_3d:
-            shape_2d = copy.deepcopy(vv.shape)
-            vv = vv.view(vv.shape[0],-1)
+            shape_2d = vv.shape
+            vv = vv.view(vv.shape[0], -1)
 
-        # swap rows and columns
         vv = vv.T
-
-        # process matrix size
         nk = vv.size(1)
-        uu = torch.zeros_like(vv, device=vv.device)
+        uu = torch.zeros_like(vv)
 
-        # get starting point
-        pt = int(self.e_pool_size / (self.n_tasks))
-        s = int(self.task_count * pt)
-        f = int((self.task_count + 1) * pt)
+        pt = int(self.e_pool_size / self.n_tasks)
+        s  = int(self.task_count * pt)
+        f  = int((self.task_count + 1) * pt)
+
         if s > 0:
             uu[:, 0:s] = vv[:, 0:s].clone()
+
         for k in range(s, f):
             redo = True
             while redo:
                 redo = False
-                vk = torch.randn_like(vv[:,k]).to(vv.device)
+                vk = torch.randn_like(vv[:, k])
                 uk = 0
-                for j in range(0, k):
+                for j in range(k):
                     if not redo:
-                        uj = uu[:, j].clone()
-                        proj = projection(uj, vk)
+                        proj = projection(uu[:, j].clone(), vk)
                         if proj is None:
                             redo = True
-                            print('restarting!!!')
                         else:
                             uk = uk + proj
-                if not redo: uu[:, k] = vk - uk
+                if not redo:
+                    uu[:, k] = vk - uk
+
         for k in range(s, f):
-            uk = uu[:, k].clone()
-            uu[:, k] = uk / (uk.norm())
+            uu[:, k] = uu[:, k] / uu[:, k].norm()
 
-        # undo swapping of rows and columns
-        uu = uu.T 
-
-        # return from 2D
+        uu = uu.T
         if is_3d:
             uu = uu.view(shape_2d)
-        
-        return torch.nn.Parameter(uu) 
 
-    def gram_schmidt_full(self, vv):
-        def projection(u, v):
-            denominator = (u * u).sum()
-            if denominator < 1e-8:
-                return None
-            else:
-                return (v * u).sum() / denominator * u
+        return nn.Parameter(uu)
 
-        is_3d = len(vv.shape) == 3
-        if is_3d:
-            shape_2d = copy.deepcopy(vv.shape)
-            vv = vv.view(vv.shape[0],-1)
-
-        vv = vv.T
-        uu = torch.zeros_like(vv, device=vv.device)
-
-        # Xử lý toàn bộ không cắt lát [s:f] như E-pool
-        for k in range(vv.size(1)):
-            redo = True
-            while redo:
-                redo = False
-                vk = torch.randn_like(vv[:,k]).to(vv.device)
-                uk = 0
-                for j in range(0, k):
-                    if not redo:
-                        uj = uu[:, j].clone()
-                        proj = projection(uj, vk)
-                        if proj is None:
-                            redo = True
-                        else:
-                            uk = uk + proj
-                if not redo: uu[:, k] = vk - uk
-                
-        for k in range(vv.size(1)):
-            uk = uu[:, k].clone()
-            uu[:, k] = uk / (uk.norm())
-
-        uu = uu.T 
-        if is_3d:
-            uu = uu.view(shape_2d)
-        
-        return torch.nn.Parameter(uu)
     def forward(self, x_querry, l, x_block, train=False, task_id=None):
         B, C = x_querry.shape
-        p_return = None
         loss = 0
 
-        # -------------------------------------------------------------
-        # XỬ LÝ G-COMPONENTS (Shared)
-        # -------------------------------------------------------------
-        # -------------------------------------------------------------
-        # XỬ LÝ G-COMPONENTS (Shared)
-        # -------------------------------------------------------------
+        # --- G-COMPONENTS ---
         if l in self.g_layers:
-            p = getattr(self, f'g_p_{l}')
-            
-            # Không tính Cosine. Copy (expand) G-Prompt gắn vào mọi bức ảnh
-            # Chuyển shape từ (1, length, dim) -> (Batch, length, dim)
-            P_ = p.repeat(B, 1, 1)
-
-            # Phân tách Key, Value cho prefix tuning
-            i = int(self.g_p_length / 2)
+            p = getattr(self, f'g_p_{l}')        # (1, g_p_length, emb_d)
+            P_ = p.expand(B, -1, -1)              # FIX: expand thay vì repeat
+            i  = self.g_p_length // 2
             Gk = P_[:, :i, :]
             Gv = P_[:, i:, :]
-            p_return = [Gk, Gv]
-            
-            loss = 0
+            return [Gk, Gv], 0, x_block           # Early return, không cần elif
 
-
-        # -------------------------------------------------------------
-        # XỬ LÝ E-COMPONENTS (Task-specific)
-        # -------------------------------------------------------------
-        elif l in self.e_layers:
+        # --- E-COMPONENTS ---
+        if l in self.e_layers:
             K = getattr(self, f'e_k_{l}')
             A = getattr(self, f'e_a_{l}')
             p = getattr(self, f'e_p_{l}')
-            
-            pt = int(self.e_pool_size / (self.n_tasks))
-            s = int(self.task_count * pt)
-            f = int((self.task_count + 1) * pt)
-            
+
+            pt = int(self.e_pool_size / self.n_tasks)
+            s  = int(self.task_count * pt)
+            f  = int((self.task_count + 1) * pt)
+
             if train:
                 if self.task_count > 0:
-                    K = torch.cat((K[:s].detach().clone(), K[s:f]), dim=0)
-                    A = torch.cat((A[:s].detach().clone(), A[s:f]), dim=0)
-                    p = torch.cat((p[:s].detach().clone(), p[s:f]), dim=0)
+                    K = torch.cat([K[:s].detach(), K[s:f]], dim=0)
+                    A = torch.cat([A[:s].detach(), A[s:f]], dim=0)
+                    p = torch.cat([p[:s].detach(), p[s:f]], dim=0)
                 else:
                     K = K[s:f]
                     A = A[s:f]
                     p = p[s:f]
             else:
-                K = K[0:f]
-                A = A[0:f]
-                p = p[0:f]
+                K = K[:f]
+                A = A[:f]
+                p = p[:f]
 
-            # Attention
-            a_querry = torch.einsum('bd,kd->bkd', x_querry, A)
-            n_K = nn.functional.normalize(K, dim=1)
-            q = nn.functional.normalize(a_querry, dim=2)
-            aq_k = torch.einsum('bkd,kd->bk', q, n_K)
-            P_ = torch.einsum('bk,kld->bld', aq_k, p)
+            # Attention weighting
+            a_q   = torch.einsum('bd,kd->bkd', x_querry, A)
+            n_K   = F.normalize(K, dim=1)
+            q     = F.normalize(a_q, dim=2)
+            aq_k  = torch.einsum('bkd,kd->bk', q, n_K)
+            P_    = torch.einsum('bk,kld->bld', aq_k, p)
 
-            i = int(self.e_p_length / 2)
+            i  = self.e_p_length // 2
             Ek = P_[:, :i, :]
             Ev = P_[:, i:, :]
-            p_return = [Ek, Ev]
 
-            # --- MỚI: Tính toán Loss ---
             if train:
-                # 1. Ortho cho E (Tránh quên)
+                # Ortho loss cho E
                 if self.ortho_mu > 0:
-                    loss = ortho_penalty(K) * self.ortho_mu
+                    loss  = ortho_penalty(K) * self.ortho_mu
                     loss += ortho_penalty(A) * self.ortho_mu
-                    loss += ortho_penalty(p.view(p.shape[0], -1)) * self.ortho_mu
-                
-                # 2. Cross-Ortho G-E (Tránh interference/Lazy Learning)
-                if self.ortho_mu_ge > 0:
-                    G_P_all = torch.cat([getattr(self, f'g_p_{g}') for g in self.g_layers], dim=0)
-                    
-                    flat_e_p = p.reshape(-1, self.emb_d)
-                    
-                    # [FIX 2]: Thêm .detach() vào G_P_all.
-                    # Ép E phải né G, nhưng cấm E đẩy gradient ngược về làm hỏng G.
-                    # Điều này vừa tăng accuracy vừa tiết kiệm bộ nhớ cực lớn!
-                    flat_g_p = G_P_all.detach().reshape(-1, self.emb_d)
-                    
-                    loss += cross_ortho_penalty(flat_e_p, flat_g_p) * self.ortho_mu_ge
-            else:
-                loss = 0
+                    loss += ortho_penalty(
+                        p.reshape(p.shape[0], -1)
+                    ) * self.ortho_mu
 
-        return p_return, loss, x_block
+                # Cross-ortho G-E: ép E-prompt né G-prompt
+                if self.ortho_mu_ge > 0:
+                    with torch.no_grad():               # FIX: không cần grad cho G
+                        G_flat = torch.cat([
+                            getattr(self, f'g_p_{g}').reshape(-1, self.emb_d)
+                            for g in self.g_layers
+                        ], dim=0)                       # (n_g_tokens, emb_d)
+                    E_flat = p.reshape(-1, self.emb_d)  # (n_e_tokens, emb_d)
+                    loss += cross_ortho_penalty(E_flat, G_flat) * self.ortho_mu_ge
+
+            return [Ek, Ev], loss, x_block
+
+        # Layer không thuộc G hay E
+        return None, 0, x_block
+
+
 def ortho_penalty(t):
-    return ((t @t.T - torch.eye(t.shape[0]).cuda())**2).mean()
+    # FIX: dùng device của t thay vì hardcode .cuda()
+    eye = torch.eye(t.shape[0], device=t.device)
+    return ((t @ t.T - eye) ** 2).mean()
+
+
 def cross_ortho_penalty(t1, t2):
-    """Ép trực giao chéo giữa 2 tensor khác kích thước (ví dụ: G và E)"""
-    n_t1 = nn.functional.normalize(t1, dim=1)
-    n_t2 = nn.functional.normalize(t2, dim=1)
-    # Ma trận tương quan chéo
-    cross_corr = n_t1 @ n_t2.T 
-    return (cross_corr ** 2).mean()
+    n1 = F.normalize(t1, dim=1)
+    n2 = F.normalize(t2, dim=1)
+    # FIX: dùng mean thay vì sum để scale invariant với pool size
+    return (n1 @ n2.T).pow(2).mean()
 # @article{wang2022dualprompt,
 #   title={DualPrompt: Complementary Prompting for Rehearsal-free Continual Learning},
 #   author={Wang, Zifeng and Zhang, Zizhao and Ebrahimi, Sayna and Sun, Ruoxi and Zhang, Han and Lee, Chen-Yu and Ren, Xiaoqi and Su, Guolong and Perot, Vincent and Dy, Jennifer and others},
