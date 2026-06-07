@@ -32,8 +32,27 @@ class Prompt(NormalNN):
         logits[:,:self.last_valid_out_dim] = -float('inf')
         dw_cls = self.dw_k[-1 * torch.ones(targets.size()).long()]
         total_loss = self.criterion(logits, targets.long(), dw_cls)
+        #-----------------------------------
+        ce_loss_val = total_loss.mean().item()
+        
+        if not hasattr(self, 'log_step'):
+            self.log_step = 0
+        self.log_step += 1
 
-        # ce loss
+        if self.log_step % 100 == 0:
+            # Lấy module prompt ra (Xử lý an toàn cho cả DataParallel Multi-GPU)
+            prompt_module = self.model.module.prompt if hasattr(self.model, 'module') else self.model.prompt
+            
+            if hasattr(prompt_module, 'get_raw_losses'):
+                raw_e, raw_ge = prompt_module.get_raw_losses()
+                scaled_e = raw_e * prompt_module.ortho_mu
+                scaled_ge = raw_ge * prompt_module.ortho_mu_ge
+                
+                print(f"\\n[Step {self.log_step}] Loss_CE: {ce_loss_val:.4f} | "
+                      f"Raw_E: {raw_e:.4f} (Scaled: {scaled_e:.4f}) | "
+                      f"Raw_GE: {raw_ge:.4f} (Scaled: {scaled_ge:.4f})")
+        # ----------------------------------
+        # ce loss   
         total_loss = total_loss + prompt_loss.sum()
 
         # step

@@ -38,7 +38,7 @@ class CodaPrompt(nn.Module):
     def _init_smart(self, emb_d, prompt_param):
         self.e_pool_size = int(prompt_param[0])
         self.e_p_length  = int(prompt_param[1])
-        self.ortho_mu    = prompt_param[2]
+        self.ortho_mu    = 0.01   # orthogonal loss E
         self.ortho_mu_ge = 0.01   # cross-ortho G↔E
 
         # ── Vị trí: G nông, E sâu (theo DualPrompt + triết lý) ──
@@ -48,7 +48,25 @@ class CodaPrompt(nn.Module):
         # ── G chỉ cần 1 vector tĩnh, length = e_length ──
         self.g_pool_size = 1
         self.g_p_length  = self.e_p_length   # giữ cùng length để ViT nhất quán
-
+    @torch.no_grad()
+    def get_raw_losses(self):
+        """Hàm gom toàn bộ raw loss từ các layer để gửi ra ngoài cho Learner log"""
+        raw_e = 0.0
+        raw_ge = 0.0
+        
+        # Gom G_flat một lần
+        G_flat = torch.cat([getattr(self, f'g_p_{g}').reshape(-1, self.emb_d) for g in self.g_layers], dim=0)
+        
+        for l in self.e_layers:
+            K = getattr(self, f'e_k_{l}')
+            A = getattr(self, f'e_a_{l}')
+            p = getattr(self, f'e_p_{l}')
+            
+            raw_e += ortho_penalty(K) + ortho_penalty(A) + ortho_penalty(p.view(p.shape[0], -1))
+            E_flat = p.reshape(-1, self.emb_d)
+            raw_ge += cross_ortho_penalty(E_flat, G_flat)
+            
+        return raw_e.item(), raw_ge.item()
     def process_task_count(self):
         self.task_count += 1
         # Chỉ reinit E (G được update liên tục, không cần reinit)
@@ -181,6 +199,7 @@ class CodaPrompt(nn.Module):
                     E_flat = p.reshape(-1, self.emb_d)
                     loss  += cross_ortho_penalty(E_flat, G_flat) * self.ortho_mu_ge
 
+                  
             return [Ek, Ev], loss, x_block
 
         # Layer không thuộc G hay E
