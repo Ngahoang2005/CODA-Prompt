@@ -38,9 +38,13 @@ class CodaPrompt(nn.Module):
     def _init_smart(self, emb_d, prompt_param):
         self.e_pool_size = int(prompt_param[0])
         self.e_p_length  = int(prompt_param[1])
-        self.ortho_mu    = 0.5  # orthogonal loss E
-        self.ortho_mu_ge = 0.5 # cross-ortho G↔E
-
+        self.ortho_mu = prompt_param[2]
+        
+        # Nhận giá trị 200.0 từ bash script (nếu có truyền)
+        if len(prompt_param) > 3:
+            self.ortho_mu_ge = float(prompt_param[3])
+        else:
+            self.ortho_mu_ge = 0.01
         # ── Vị trí: G nông, E sâu (theo DualPrompt + triết lý) ──
         self.g_layers    = [0, 1]
         self.e_layers    = [2, 3, 4]
