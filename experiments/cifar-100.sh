@@ -27,11 +27,8 @@ mkdir -p $OUTDIR
 #    arg 3 = ortho penalty loss weight - with updated code, now can be 0!
 python -u run.py --config $CONFIG --gpuid $GPUID --repeat $REPEAT --overwrite $OVERWRITE \
     --learner_type prompt --learner_name CODAPrompt \
-    --prompt_param 100 8 0.0 0.0 \
+    --prompt_param 100 8 0.0 0.01 \
     --log_dir ${OUTDIR}/coda-p
-
-
-
 
 
 
